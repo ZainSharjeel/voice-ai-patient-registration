@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Patient Registry — Voice AI Intake</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--ink:#14213d;--muted:#6b7280;--line:#e5e7eb;--accent:#0f766e;--accent-soft:#ccfbf1;--warn:#b45309;--warn-soft:#fef3c7}
+  *{box-sizing:border-box}body{margin:0;font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+  header{background:var(--ink);color:#fff;padding:18px 32px;display:flex;justify-content:space-between;align-items:center}
+  header h1{margin:0;font-size:18px;font-weight:600}header small{color:#cbd5e1}
+  main{max-width:1200px;margin:0 auto;padding:24px 32px}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:20px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .stat b{display:block;font-size:26px}.stat span{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  .bar{display:flex;gap:8px;margin-bottom:12px}.bar input{flex:1;padding:9px 12px;border:1px solid var(--line);border-radius:8px;font:inherit}
+  button{padding:9px 14px;border:0;border-radius:8px;background:var(--accent);color:#fff;font:inherit;cursor:pointer}
+  .grid{display:grid;grid-template-columns:1.6fr 1fr;gap:20px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .card h2{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line)}
+  table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px 16px;border-bottom:1px solid var(--line)}
+  th{font-size:11px;text-transform:uppercase;color:var(--muted);letter-spacing:.04em}
+  tbody tr{cursor:pointer}tbody tr:hover{background:#f9fafb}tr.sel{background:var(--accent-soft)!important}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;background:var(--accent-soft);color:var(--accent)}
+  .pill.incomplete{background:var(--warn-soft);color:var(--warn)}
+  .detail{padding:16px}.detail dl{display:grid;grid-template-columns:140px 1fr;gap:6px 12px;margin:0}
+  .detail dt{color:var(--muted)}.detail dd{margin:0}
+  .muted{color:var(--muted)}pre{white-space:pre-wrap;background:#f9fafb;border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px;max-height:260px;overflow:auto}
+  h3{font-size:13px;margin:18px 0 8px}
+  @media(max-width:900px){.grid,.stats{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header><div><h1>Patient Registry</h1><small>Records captured by the voice intake agent · live from the database</small></div>
+<small><a href="/docs" style="color:#99f6e4">API docs</a></small></header>
+<main>
+  <div class="stats">
+    <div class="stat"><b id="s-total">–</b><span>Patients</span></div>
+    <div class="stat"><b id="s-today">–</b><span>Registered today</span></div>
+    <div class="stat"><b id="s-calls">–</b><span>Calls logged</span></div>
+    <div class="stat"><b id="s-inc">–</b><span>Incomplete calls</span></div>
+  </div>
+  <div class="bar"><input id="q" placeholder="Filter by name, phone, city…"><button onclick="load()">Refresh</button></div>
+  <div class="grid">
+    <div class="card"><h2>Patients</h2>
+      <table><thead><tr><th>Name</th><th>DOB</th><th>Phone</th><th>Location</th><th>Registered</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="5" class="muted">Loading…</td></tr></tbody></table>
+    </div>
+    <div class="card"><h2>Details</h2><div class="detail" id="detail"><p class="muted">Select a patient to see their record, call transcripts and appointments.</p></div></div>
+  </div>
+  <div class="card" style="margin-top:20px"><h2>Recent calls</h2>
+    <table><thead><tr><th>When</th><th>Caller</th><th>Outcome</th><th>Ended</th><th>Summary</th></tr></thead><tbody id="calls"></tbody></table>
+  </div>
+</main>
+<script>
+let patients=[], calls=[];
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtPhone=p=>p&&p.length===10?`(${p.slice(0,3)}) ${p.slice(3,6)}-${p.slice(6)}`:esc(p||'—');
+const fmtTs=t=>t?new Date(t).toLocaleString():'—';
+async function get(u){const r=await fetch(u);const j=await r.json();if(j.error)throw new Error(j.error.message);return j.data}
+async function load(){
+  [patients,calls]=await Promise.all([get('/patients?limit=500'),get('/calls?limit=100')]);
+  const today=new Date().toDateString();
+  document.getElementById('s-total').textContent=patients.length;
+  document.getElementById('s-today').textContent=patients.filter(p=>new Date(p.created_at).toDateString()===today).length;
+  document.getElementById('s-calls').textContent=calls.length;
+  document.getElementById('s-inc').textContent=calls.filter(c=>c.outcome==='incomplete').length;
+  render();
+  document.getElementById('calls').innerHTML=calls.map(c=>`<tr onclick="${c.patient_id?`show('${c.patient_id}')`:''}"><td>${fmtTs(c.created_at)}</td><td>${esc(c.caller_number||'—')}</td><td><span class="pill ${c.outcome==='incomplete'?'incomplete':''}">${esc(c.outcome)}</span></td><td>${esc(c.ended_reason||'—')}</td><td>${esc((c.summary||'').slice(0,140))}</td></tr>`).join('')||'<tr><td colspan="5" class="muted">No calls yet</td></tr>';
+}
+function render(){
+  const q=document.getElementById('q').value.toLowerCase();
+  const list=patients.filter(p=>!q||JSON.stringify(p).toLowerCase().includes(q));
+  document.getElementById('rows').innerHTML=list.map(p=>`<tr id="r-${p.patient_id}" onclick="show('${p.patient_id}')"><td><b>${esc(p.first_name)} ${esc(p.last_name)}</b></td><td>${esc(p.date_of_birth)}</td><td>${fmtPhone(p.phone_number)}</td><td>${esc(p.city)}, ${esc(p.state)}</td><td>${fmtTs(p.created_at)}</td></tr>`).join('')||'<tr><td colspan="5" class="muted">No patients</td></tr>';
+}
+async function show(id){
+  document.querySelectorAll('tr.sel').forEach(r=>r.classList.remove('sel'));
+  document.getElementById('r-'+id)?.classList.add('sel');
+  const [p,pc,pa]=await Promise.all([get('/patients/'+id),get(`/patients/${id}/calls`),get(`/patients/${id}/appointments`)]);
+  const row=(k,v)=>`<dt>${k}</dt><dd>${v||'<span class="muted">—</span>'}</dd>`;
+  document.getElementById('detail').innerHTML=`<dl>
+    ${row('Name',esc(p.first_name+' '+p.last_name))}${row('Date of birth',esc(p.date_of_birth))}${row('Sex',esc(p.sex))}
+    ${row('Phone',fmtPhone(p.phone_number))}${row('Email',esc(p.email))}
+    ${row('Address',esc([p.address_line_1,p.address_line_2].filter(Boolean).join(', '))+'<br>'+esc(`${p.city}, ${p.state} ${p.zip_code}`))}
+    ${row('Insurance',esc([p.insurance_provider,p.insurance_member_id].filter(Boolean).join(' · ')))}
+    ${row('Language',esc(p.preferred_language))}
+    ${row('Emergency contact',esc(p.emergency_contact_name?(p.emergency_contact_name+' · '+fmtPhone(p.emergency_contact_phone)):''))}
+    ${row('Patient ID','<code>'+esc(p.patient_id)+'</code>')}${row('Updated',fmtTs(p.updated_at))}</dl>
+    <h3>Appointments</h3>${pa.length?pa.map(a=>`<div>${fmtTs(a.scheduled_for)} — ${esc(a.provider_name)}</div>`).join(''):'<p class="muted">None</p>'}
+    <h3>Call transcripts</h3>${pc.length?pc.map(c=>`<div class="muted">${fmtTs(c.created_at)} · ${esc(c.outcome)}</div>${c.summary?`<p>${esc(c.summary)}</p>`:''}<pre>${esc(c.transcript||'Transcript arrives when the call ends.')}</pre>`).join(''):'<p class="muted">No calls linked</p>'}`;
+}
+document.getElementById('q').addEventListener('input',render);
+load().catch(e=>document.getElementById('rows').innerHTML=`<tr><td colspan="5">Error: ${esc(e.message)}</td></tr>`);
+setInterval(()=>load().catch(()=>{}),15000);
+</script>
+</body>
+</html>
