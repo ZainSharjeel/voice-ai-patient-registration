@@ -12,8 +12,6 @@ services:
           property: connectionString
       - key: VAPI_WEBHOOK_SECRET
         generateValue: true
-      - key: PUBLIC_BASE_URL
-        sync: false
 databases:
   - name: patient-registration-db
     plan: free
