@@ -1,193 +1,187 @@
 # Voice AI Agent — Patient Registration
 
-Call a real U.S. phone number, talk to **Ava**, a voice agent that handles patient intake. She collects standard U.S. patient demographics in a natural conversation, reads everything back for confirmation and saves the record to PostgreSQL. You can then see the record through a REST API and a live dashboard.
+A phone-based AI agent ("Ava") that registers new patients for a medical clinic in a natural conversation,
+validates every field, reads everything back for confirmation, and saves the record to a persistent database
+exposed through a REST API. Built for the CareCloud AI Engineer take-home.
 
 | | |
 |---|---|
-| 📞 **Phone number** | `{{PHONE_NUMBER}}` |
-| 🌐 **API base URL** | `{{BASE_URL}}` |
-| 📊 **Dashboard** | `{{BASE_URL}}/dashboard` |
-| 📘 **Interactive API docs (OpenAPI)** | `{{BASE_URL}}/docs` |
+| **Call the agent** | **+1 (323) 306-8029** |
+| **REST API base URL** | `https://clever-pelican-734.convex.site` |
+| **Live dashboard** | https://carecloud-intake-ai-offers.viktor.space |
+| **Health check** | `GET https://clever-pelican-734.convex.site/health` |
 
-No credentials are needed for testing. The API and dashboard are open on purpose so reviewers can get in easily; see *Limitations*.
+No credentials are needed: the API is open for review (see Limitations). Two demo patients are seeded:
+**Jane Doe** (phone 212-555-0147, DOB 03/14/1985) and **Carlos Rivera** (305-555-0199, Spanish speaker).
+Give Jane's phone number during a call to see duplicate detection.
 
 ---
 
 ## Architecture
 
 ```
- ┌──────────┐   PSTN    ┌──────────────────────────── Vapi ───────────────────────────┐
- │  Caller  │ ────────▶ │  Phone number → Deepgram STT → GPT-4o (prompt + tools) → TTS │
- └──────────┘           └───────────────────────────────┬──────────────────────────────┘
-                                                        │ HTTPS webhook (tool calls,
-                                                        │ end-of-call report) + shared secret
-                                ┌───────────────────────▼───────────────────────┐
-                                │ FastAPI service                               │
-                                │  app/api/vapi.py      ← Vapi adapter (only    │
-                                │                         vendor-specific code) │
-                                │  app/agent/tools.py   ← provider-agnostic     │
-                                │                         tool logic            │
-                                │  app/api/patients.py  ← REST API              │
-                                │  app/services/*       ← business logic (one   │
-                                │                         path for API + agent) │
-                                │  app/schemas.py +                             │
-                                │  app/validation.py    ← server-side validation│
-                                │  app/models.py        ← SQLAlchemy schema     │
-                                └───────────────────────┬───────────────────────┘
-                                                        │
-                                              ┌─────────▼─────────┐
-                                              │ PostgreSQL        │  patients, call_logs,
-                                              │ (Railway)         │  appointments
-                                              └───────────────────┘
+ Caller ──PSTN──▶ Vapi (US number · Deepgram nova-3 STT · GPT-4o · ElevenLabs TTS)
+                        │  tool calls / end-of-call report (HTTPS webhook, shared-secret header)
+                        ▼
+              Convex HTTP router  (convex/http.ts)
+          ┌─────────────┴──────────────┐
+   /vapi/webhook                 /patients, /calls, /health      ◀── REST clients
+   convex/agent.ts (tools)       convex/restApi.ts (envelope, status codes)
+          └─────────────┬──────────────┘
+                 service layer: convex/patients.ts · calls.ts · appointments.ts
+                 validation:    convex/validation.ts   (ONE set of rules for both channels)
+                        ▼
+              Convex database (persistent, transactional)  ──live query──▶ React dashboard (src/)
 ```
 
-**Separation of concerns**
-- **Telephony / speech** (Vapi): the phone number, speech-to-text, text-to-speech, barge-in and turn-taking.
-- **Conversation logic**: the LLM system prompt (`app/agent/prompt.py`) plus tool definitions (`app/agent/assistant_config.py`). The full assistant is defined in code and provisioned by `scripts/provision_vapi.py`, so it's version-controlled and reproducible.
-- **Tools** (`app/agent/tools.py`): plain Python functions that take dicts and return dicts. They don't depend on Vapi, so moving to Retell or Twilio would only mean writing a new adapter.
-- **Data layer**: the voice tools and the REST API call **the same service layer and the same validators**, so a record created by phone and one created through `POST /patients` go through identical rules.
+**Key design decisions**
 
-**Call flow**
-1. Ava greets the caller and collects the required fields. She accepts answers given out of order, handles corrections and supports "start over".
-2. As soon as she has the phone number she calls `find_patient_by_phone`. If it matches an existing record, she says *"It looks like we already have a record for Jane Doe. Would you like to update your information instead?"* (bonus: duplicate detection). Before changing anything she verifies the caller's DOB.
-3. She offers the optional bundle once (insurance, emergency contact, preferred language).
-4. She reads back **all** fields, spelling the last name letter by letter, and waits for an explicit "yes".
-5. She calls `register_patient`. The server validates again, writes to Postgres and logs the final payload. If any field is invalid, she gets per-field errors and re-asks for **only those fields**. If the database fails, she gets a `system_error` and tells the caller honestly that nothing was saved, so there's never silence or a false "success".
-6. She says "You're all set, [First Name]." and offers to book a first appointment (bonus, mock slots). Then she says goodbye and ends the call.
-7. Vapi sends an end-of-call report. The transcript and summary are stored in `call_logs` and linked to the patient (bonus). A call that drops before saving is stored with `outcome=incomplete` and its partial transcript, so staff can follow up.
+- **One validation + persistence path.** The voice agent never writes to the DB directly; its tools call the same
+  service layer and validators as `POST /patients`. A record created by phone is indistinguishable from one created
+  via the API, and rules can't drift between channels.
+- **The LLM validates conversationally, the server validates authoritatively.** The prompt tells Ava the rules so she
+  can re-prompt instantly ("I heard 8 digits, could you repeat your phone number?"). The server re-checks everything
+  and returns field-level errors; the tool result tells Ava to re-ask for *only* the failing field.
+- **Tool results carry an `instruction`.** Every tool response (success, validation error, duplicate, system error)
+  tells the model what to say next, so the caller never hears silence or a false "you're saved". A database failure
+  rolls back the mutation and Ava says honestly that nothing was saved.
+- **Confirmation before save.** The prompt makes the read-back mandatory; `register_patient` is described as
+  "only after the caller confirmed".
+- **Transactional writes.** Each request or tool call is a single Convex mutation, so it applies fully or not at all.
+- **Infrastructure as code for the agent.** The full Vapi assistant (prompt, voice, transcriber, tools, webhook) is
+  defined in `voice-agent/assistantConfig.ts`, and `bun run provision:vapi` creates or updates it idempotently.
 
-## Tech stack & why
+### Stack and why
 
 | Layer | Choice | Why |
 |---|---|---|
-| Telephony + STT/TTS | **Vapi** (free U.S. number) | Takes care of the PSTN, streaming STT/TTS, interruptions and endpointing, so the time goes into the prompt, the tools and the backend (as the brief recommends). |
-| STT | Deepgram **nova-3, `multi`** | Low latency, and handles English/Spanish code-switching (bonus: multi-language). |
-| LLM | OpenAI **GPT-4o**, temperature 0.3 | Reliable tool-calling and good at handling corrections. Low temperature keeps data capture consistent. |
-| TTS | ElevenLabs **turbo v2.5** | Natural voice with low latency; multilingual, so it can speak Spanish. |
-| Backend | **Python 3.12 + FastAPI** | Typed, fast to build, automatic OpenAPI docs at `/docs`. |
-| Validation | **Pydantic v2** + pure validators | One set of rules, reused by both the API and the agent. |
-| DB | **PostgreSQL** (SQLAlchemy 2.0) | Relational data with real constraints. SQLite is used automatically for local dev and tests. |
-| Hosting | **Railway** (Docker) | Always-on (no cold start in the middle of a call), managed Postgres, deploys straight from the repo. |
+| Telephony + STT/TTS orchestration | **Vapi** | Real US number in minutes, low-latency turn-taking, barge-in, function calling, end-of-call transcripts. |
+| LLM | **OpenAI GPT-4o** (temp 0.3) | Reliable tool calling and instruction following; low temperature for accurate data capture. |
+| Speech | **Deepgram nova-3 (multi)** + **ElevenLabs turbo v2.5** | Fast, accurate on names and digits; both multilingual, so the Spanish switch works mid-call. |
+| Backend + DB | **Convex** (TypeScript) | Persistent, ACID document DB with HTTP actions on one always-on deployment, so there are no cold starts mid-call. Live queries power the dashboard with no extra code. |
+| Dashboard | React 19 + Vite + Tailwind | Real-time view of patients and call transcripts. |
 
-## Data model
-
-`patients`: every field from the brief, with real column types (`UUID`, `DATE`, `TIMESTAMPTZ`, sized `VARCHAR`s), a `sex` enum enforced by a CHECK constraint, CHECK constraints on phone, state, ZIP and name lengths, and indexes on `phone_number`, `last_name` and `date_of_birth` (the API's filter fields). `created_at` and `updated_at` are set automatically in UTC. `deleted_at` handles soft deletes.
-
-Validation rules (`app/validation.py`):
-- **Names**: 1–50 letters (accented letters allowed), hyphens and apostrophes. Single internal spaces are also allowed (e.g. "De La Cruz"); see trade-offs.
-- **DOB**: must be a real calendar date, can't be in the future, can't be more than 130 years ago. Accepts `MM/DD/YYYY` (also `YYYY-MM-DD`) and is always returned as `MM/DD/YYYY`.
-- **Phone**: must be 10 digits after removing formatting and a leading `+1`. The area code can't start with 0 or 1.
-- **State**: valid USPS code, including DC and territories. Full names are mapped to codes ("California" → `CA`).
-- **ZIP**: `12345` or `12345-6789` (9 bare digits are reformatted).
-- **Email**: RFC syntax check. **Member ID**: alphanumeric, uppercased.
-- **Sanitization**: control characters are stripped, whitespace is collapsed, and unknown fields are rejected (`extra=forbid`).
-
-Other tables: `call_logs` (transcript, summary, outcome, ended reason, linked `patient_id`) and `appointments` (mock scheduling).
+---
 
 ## REST API
 
-All responses use the envelope `{"data": ..., "error": null}`. On error: `{"data": null, "error": {"code", "message", "details": [{"field","message"}]}}`.
+All responses use the envelope `{"data": ..., "error": null}` or `{"data": null, "error": {"code", "message", "details?"}}`.
 
-| Method | Endpoint | Notes |
+| Method | Path | Description |
 |---|---|---|
-| GET | `/patients` | Filters: `?last_name=` (case-insensitive), `?date_of_birth=` (MM/DD/YYYY), `?phone_number=` (any format). Also supports `limit`/`offset`. |
-| GET | `/patients/{id}` | 404 if missing or soft-deleted, 400 if the UUID is malformed |
-| POST | `/patients` | 201 + created record with `patient_id`, 422 with per-field errors |
-| PUT | `/patients/{id}` | Partial update. Required fields can't be cleared. |
-| DELETE | `/patients/{id}` | Soft delete (sets `deleted_at`; the record disappears from GET) |
-| GET | `/patients/{id}/calls` | Call transcripts linked to the patient (bonus) |
-| GET | `/patients/{id}/appointments` | Booked appointments (bonus) |
-| GET | `/calls` | All call logs, including incomplete or dropped calls |
-| GET | `/health` | Liveness check plus DB connectivity |
-| POST | `/vapi/webhook` | Vapi tool calls and end-of-call reports. Requires the `x-vapi-secret` header. |
+| GET | `/patients` | List active patients. Filters: `last_name` (case-insensitive), `date_of_birth` (MM/DD/YYYY or YYYY-MM-DD), `phone_number` (any format). Paging: `limit` (1–500, default 100), `offset`. |
+| GET | `/patients/:id` | Get one patient by UUID. |
+| POST | `/patients` | Create a patient. Validates all fields server-side. Returns 201. |
+| PUT | `/patients/:id` | Partial update: only the fields sent change. Required fields can't be cleared; optional fields clear with `null`. |
+| DELETE | `/patients/:id` | Soft delete (sets `deleted_at`). The patient disappears from GET. |
+| GET | `/patients/:id/calls` | Bonus: call log and transcripts linked to the patient. |
+| GET | `/patients/:id/appointments` | Bonus: booked appointments. |
+| GET | `/calls` | Bonus: recent calls (outcome `registered` / `updated` / `incomplete`). |
+| GET | `/health` | Liveness and DB check. |
+| POST | `/vapi/webhook` | Vapi server URL (tool calls, status updates, end-of-call reports). Requires the `x-vapi-secret` header. |
 
-Status codes: 200, 201, 400 (malformed JSON, body or UUID), 401 (webhook secret), 404, 422 (validation), 500 (unexpected error, logged with a stack trace).
+Status codes: `200` OK · `201` created · `400` malformed JSON, non-object body, bad UUID or bad query param ·
+`404` not found or soft-deleted · `422` field validation failed (with per-field `details`) · `500` unexpected error.
 
 ```bash
-curl -s {{BASE_URL}}/patients?last_name=doe
-curl -s -X POST {{BASE_URL}}/patients -H 'content-type: application/json' -d '{
-  "first_name":"Ana","last_name":"Lopez","date_of_birth":"07/04/1990","sex":"Female",
+B=https://clever-pelican-734.convex.site
+curl "$B/patients?last_name=doe"
+curl -X POST $B/patients -H 'content-type: application/json' -d '{
+  "first_name":"John","last_name":"Smith","date_of_birth":"05/02/1990","sex":"Male",
   "phone_number":"(415) 555-0123","address_line_1":"1 Market St","city":"San Francisco",
   "state":"CA","zip_code":"94105"}'
 ```
 
-## Prompt engineering
+### Data model and validation
 
-The full system prompt is in **`app/agent/prompt.py`**. It's split into commented sections: identity and tone, fields, conversational robustness, validation and tool usage. Python comments explain each design decision and are not sent to the model. Key choices:
-- **Written for voice**: one question per turn, no lists or markdown (TTS would read the symbols), phone numbers spoken digit by digit, varied acknowledgements so she doesn't sound robotic.
-- **Today's date injected at call time** (Vapi Liquid `{{"now" | date ...}}`) so the model can reject future DOBs.
-- **Explicit rules** for corrections, out-of-order answers, interruptions, start-over and switching to Spanish.
-- **Mandatory read-back before saving**, with letter-by-letter spelling of the last name.
-- **Tool results include an `instruction`** that tells the model what to say next. This keeps failure handling (validation errors, DB down, duplicates) deterministic and keeps it from claiming success it didn't get.
-- **Defense in depth**: the agent validates during the conversation (fast re-prompts), and the server re-validates everything.
+Patient fields follow the spec: `patient_id` (UUID), first/last name, `date_of_birth`, `sex`, `phone_number`, `email`,
+`address_line_1/2`, `city`, `state`, `zip_code`, insurance provider and member ID, `preferred_language` (default English),
+emergency contact name and phone, plus `created_at`, `updated_at` and `deleted_at`.
 
-## Edge cases & resilience
+- Names: 1–50 letters, hyphens, apostrophes (accented letters allowed).
+- DOB: a real calendar date, not in the future, not more than 130 years ago. Returned as MM/DD/YYYY.
+- Phone: normalized to 10 digits. Accepts `(555) 123-4567`, `+1 555…`. Area code can't start with 0/1.
+- State: 2-letter USPS code (full names like "California" are normalized). ZIP: 5 digits or ZIP+4.
+- Sex: Male / Female / Other / Decline to Answer (natural answers like "woman" are mapped).
+- Email format, alphanumeric member ID, control-character stripping and whitespace collapsing on all text.
+- Unknown fields are rejected (422).
 
-| Scenario | Behaviour |
-|---|---|
-| Invalid DOB / 3-digit phone / bad ZIP | The prompt makes her re-ask for that one field. If a bad value still gets through, the server returns `invalid_fields` and she re-asks only for those. |
-| Corrections ("it's D-A-V-I-S") | Replaces the value, confirms it, and moves on. The final read-back catches anything left over. |
-| Caller wants to start over | Discards collected data and starts again from the name. |
-| DB write fails | The tool returns `system_error`, and Ava says the record was **not** saved and offers to retry. The error is logged with a stack trace. |
-| Call drops mid-conversation | Nothing half-saved: records are only written after confirmation. The end-of-call report stores the partial transcript as an `incomplete` call. |
-| Returning caller | Detected by phone number. She offers to update, verifies DOB, and updates only the changed fields. |
-| Family members sharing a phone | Ava can register a new person on the same phone after the caller confirms (`allow_duplicate_phone`). |
-| Webhook spoofing | Shared-secret header, compared in constant time. |
+---
 
-## Observability
+## Voice agent behavior
 
-Structured log lines go to stdout (view them in Railway → Deployments → Logs):
-`agent.tool_call`, `agent.final_payload` (the full collected JSON for every registration), `patient.created/updated/soft_deleted`, `vapi.status`, and `vapi.end_of_call` with the full transcript. Transcripts and summaries are also saved in the DB and shown on the dashboard.
+- Opens warmly, asks one thing at a time, and accepts out-of-order answers ("I'm John Smith, born May 2nd 1990").
+- Handles corrections at any point, spelling, interruptions (barge-in), "start over", and questions it can't answer.
+- Re-prompts for the specific invalid field (impossible date, wrong digit count, future DOB…).
+- Offers the optional bundle (insurance, emergency contact, language) once.
+- **Reads back all collected information and waits for a clear "yes" before saving.**
+- After the save: "You're all set, [First Name]." Then it offers a first appointment and ends the call gracefully.
+- The structured payload is logged before every save (`agent.final_payload …`), and each transcript is logged at the end of the call.
 
-## Bonus features
+**Bonus features implemented**
+- **Duplicate detection:** looks up the caller's phone number. "It looks like we already have a record for Jane Doe.
+  Would you like to update your information instead?" The update requires the caller to confirm their DOB.
+- **Appointment scheduling (mock):** offers the next business-day slots and books one, with double-booking prevented.
+- **Spanish:** switches language mid-call and stores `preferred_language = Spanish`.
+- **Call transcripts and summaries:** stored per call and linked to the patient. Dropped calls are kept as `incomplete` for follow-up.
+- **Dashboard:** live patients table and call transcripts.
+- **Tests:** unit tests for the validators, and an end-to-end suite covering the REST API and simulated Vapi webhook traffic.
 
-- ✅ Duplicate detection plus an update flow
-- ✅ Appointment scheduling (mock slots, next 3 business days)
-- ✅ Spanish support (multilingual STT/TTS, plus a prompt rule)
-- ✅ Call transcripts and summaries linked to patients
-- ✅ Dashboard at `/dashboard`
-- ✅ Automated tests: 29 pytest tests covering the API, validators and voice-agent webhook (including the DB-failure path and dropped calls)
+---
 
-## Local setup
+## Running it yourself
+
+Requirements: [Bun](https://bun.sh) ≥ 1.1 (or Node 22), a free [Convex](https://convex.dev) account, and a [Vapi](https://vapi.ai) account.
 
 ```bash
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r requirements-dev.txt
-cp .env.example .env           # optional; defaults to SQLite at ./data/patients.db
-uvicorn app.main:app --reload  # http://localhost:8000/dashboard , /docs
-pytest -q                      # run the test suite
+bun install
+bunx convex dev --once          # creates your Convex deployment and pushes the schema and functions
+bunx convex run restApi:seed    # optional demo patients
+bunx convex env set VAPI_WEBHOOK_SECRET "$(openssl rand -hex 24)"
+bun run build && bun run preview   # dashboard on http://localhost:4173
+
+# Voice agent: creates or updates the assistant and attaches a free US Vapi number
+VAPI_API_KEY=... PUBLIC_BASE_URL=https://<your-deployment>.convex.site VAPI_WEBHOOK_SECRET=... \
+  bun run provision:vapi --area-code 323
 ```
-
-To try the voice agent against a local server, expose it (`ngrok http 8000`), then run `PUBLIC_BASE_URL=https://<ngrok-url> VAPI_API_KEY=... python scripts/provision_vapi.py`.
-
-### Deploy (Railway)
-1. Create a project, add a **PostgreSQL** database, and add this repo as a service (it builds from the `Dockerfile`; health check is `/health`).
-2. Set the service variables: `DATABASE_URL=${{Postgres.DATABASE_URL}}`, `VAPI_WEBHOOK_SECRET`, `PUBLIC_BASE_URL`.
-3. Run `scripts/provision_vapi.py` once to create the assistant and attach a phone number.
 
 ### Environment variables
 
-| Variable | Required | Purpose |
+| Name | Where | Purpose |
 |---|---|---|
-| `DATABASE_URL` | prod | Postgres connection string (falls back to SQLite) |
-| `VAPI_WEBHOOK_SECRET` | recommended | Shared secret checked on `/vapi/webhook` |
-| `PUBLIC_BASE_URL` | provisioning | Public URL that Vapi tools call |
-| `VAPI_API_KEY` | provisioning only | Used by `scripts/provision_vapi.py`; never needed by the server |
-| `CLINIC_NAME`, `CLINIC_TIMEZONE` | no | Greeting and appointment timezone |
-| `SEED_DEMO_DATA` | no | Seeds Jane Doe and Carlos Rivera on an empty DB (default `true`) |
-| `LOG_LEVEL` | no | Default `INFO` |
+| `VAPI_WEBHOOK_SECRET` | Convex deployment env | Shared secret Vapi sends in `x-vapi-secret`. The webhook rejects calls without it. |
+| `VAPI_API_KEY` | Shell, provisioning only | Vapi private key, used by `voice-agent/provision.ts`. Never committed. |
+| `PUBLIC_BASE_URL` | Shell, provisioning only | The deployment's `.convex.site` URL that Vapi calls. |
+| `CLINIC_NAME` | Shell, optional | Clinic name used in the greeting (default "CareCloud Family Medicine"). |
+| `VITE_CONVEX_URL` | `.env.local` (written by `convex dev`) | Dashboard → Convex connection. |
 
-## Known limitations & trade-offs
+### Tests
 
-- **No auth on the REST API or dashboard**, to make review easy. In production I'd add API keys or OAuth and role-based access, encryption at rest and audit logging (HIPAA). The data here is demo data only.
-- **Duplicate detection reveals the name on file** to anyone who calls with a matching phone number, as the brief specifies. DOB verification is required before any update.
-- **Names may contain internal spaces** ("Mary Ann", "De La Cruz"). This is a little looser than "alphabetic + hyphens/apostrophes" because rejecting real names on a live call is worse UX.
-- **Phone numbers are not unique**, because families often share a number. Duplicates are handled conversationally instead.
-- **Tables are created on startup** (`create_all`) rather than through Alembic migrations, to fit the time limit.
-- **Appointment slots are generated mock data**, not a real calendar.
-- **Transcripts depend on Vapi's end-of-call webhook.** If our server were down at that moment the transcript would be lost; the patient record would not be affected.
-- **Speech recognition of spelled names and emails** depends on STT quality, which is why the read-back step is mandatory.
+```bash
+bun run test:validation                                    # unit tests (validators)
+API_BASE_URL=https://<deployment>.convex.site VAPI_WEBHOOK_SECRET=... bun run test:api
+```
 
-## Next steps
+The e2e suite covers create → get → filter → update → soft delete, every error status, a wrong webhook secret, and a
+full simulated call: lookup, invalid DOB re-prompt, registration, duplicate detection, update, slot booking with
+double-booking prevention, transcript storage, and a dropped call.
 
-Alembic migrations, API authentication, retry/queue for DB writes during an outage (e.g. buffer to Redis and confirm by SMS), SMS confirmation of the appointment, an evaluation suite of simulated callers (Vapi test suites) running in CI, PHI encryption, and HIPAA-eligible vendors (BAA).
+### Where the solution lives
+
+`convex/validation.ts`, `patients.ts`, `calls.ts`, `appointments.ts`, `restApi.ts`, `agent.ts`, `http.ts`, `schema.ts`,
+`seed.ts`, `dashboard.ts` · `voice-agent/` (prompt, assistant config, provisioning) · `src/pages/PublicLandingPage.tsx`
+(dashboard) · `tests/`. The remaining files (auth, UI primitives, build scripts) are the starter template the
+dashboard is hosted on. `docs/TEMPLATE_GUIDE.md` describes them.
+
+---
+
+## Known limitations and next steps
+
+- **No API authentication**, so the reviewers can test freely. Production would add API keys or OAuth plus RBAC, and the
+  dashboard would sit behind staff login. The demo data is fictitious, but real PHI needs a HIPAA BAA with every vendor
+  (Vapi, OpenAI, Deepgram, ElevenLabs, DB host), PHI redaction in logs, and audit trails.
+- Phone numbers aren't unique (families share phones). Duplicates are detected and confirmed by voice instead of being blocked by a constraint.
+- Identity verification for updates is DOB-only. A real system would add a second factor.
+- Appointment slots are mocked (no EHR or calendar integration). Times are in America/New_York.
+- Spoken email addresses are inherently error-prone, so the agent spells them back character by character.
+- Free-tier Vapi credits and number: if the line stops answering, the credits ran out (redeploy with `provision:vapi`).

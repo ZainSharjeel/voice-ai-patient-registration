@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/((?!assets/|__viktor_meta\\.json|manifest\\.webmanifest|apple-touch-icon\\.png).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

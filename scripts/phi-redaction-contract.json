@@ -1,0 +1,18 @@
+{
+  "$comment": "Cross-language PHI redaction contract. Single source of truth for the redaction policy shared by the Viktor backend logger (backend/viktor/utils/logger.py, PHI mode) and this template's Convex console shim (convex/phiLogging.ts). Asserted by backend/viktor/utils/tests/test_phi_log_sanitization.py and scripts/phi-console-redaction.test.ts — change any side and the other side's tests must still pass against this file. Policy: scalars that cannot carry PHI pass through; runtime strings, objects, and arrays are redacted wholesale to the sentinel; messages built at runtime are replaced with dynamic_message_replacement; error type names and stack frames survive, error messages never do.",
+  "sentinel": "***PHI_REDACTED***",
+  "dynamic_message_replacement": "<dynamic message> ***PHI_REDACTED***",
+  "pass_through_values": [null, true, false, 0, 42, -7, 3.14],
+  "redacted_values": [
+    "",
+    "patient chart for John Doe",
+    "j.doe@example.com · MRN 555-0100",
+    { "diagnosis": "details", "patient": "John Doe" },
+    ["John", "Doe", "1980-01-02"]
+  ],
+  "error_contract": {
+    "message": "PHI detail for John Doe",
+    "must_survive": "the error type name (and stack frames where the representation carries them)",
+    "must_not_survive": "the error message"
+  }
+}

@@ -1,0 +1,25 @@
+# Keep the hoisted linker. In a Viktor sandbox a Space's `node_modules` is a
+# symlink into sandbox-local storage (/tmp/viktor-node-modules/<hash>/, see
+# _build_node_modules_link_cmd in app_tool_handlers.py) so the dependency
+# tree never lives on the /work volume. Bun 1.4's isolated linker does not
+# install through that symlink: it unlinks it and recreates `node_modules`
+# as a real directory, which puts ~28k files on the network volume, turns
+# the ~1 s prewarmed install at Space creation into ~25 s (init_app_project
+# p50 went 29 s -> 58 s when this file shipped `linker = "isolated"` on
+# 2026-09-14), and leaves the ephemeral target empty so every deploy
+# reinstalls from scratch. Platform installs also pass `--linker hoisted`
+# on the command line (BUN_INSTALL_LINKER), but the agent's own
+# `bun install` runs in the project read this file — so it must agree.
+#
+# Isolated installs (phantom-dependency blocking) need a layout that keeps
+# the store off /work first; until then this stays hoisted. The same goes
+# for install.globalStore, which on Bun 1.4.0 additionally breaks
+# @hookform/resolvers/zod resolution (Bun issue #40243) and tsc type
+# resolution through the realpath'd store.
+[install]
+linker = "hoisted"
+
+# `bun add` / `bun update` skip releases younger than 7 days. To take a
+# younger release for a security fix, list the package in minimumReleaseAgeExcludes.
+minimumReleaseAge = 604800
+minimumReleaseAgeExcludes = []

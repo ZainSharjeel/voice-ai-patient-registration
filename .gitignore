@@ -1,7 +1,33 @@
-__pycache__/
-*.pyc
+# Dependencies (a symlink in Viktor sandboxes, so no trailing slash)
+node_modules
+
+# Build output
+dist/
+
+# Environment variables
 .env
-.venv/
-data/
-*.db
-.pytest_cache/
+.env.local
+.env.*.local
+
+# Convex generated files
+convex/_generated/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+bun.lockb
+
+# Temp/test output
+tmp/
+test-results/
+playwright-report/

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- No <link rel="manifest"> here: the pwa-install module adds it (and
+         ships the manifest) when a Space is meant to install as an app. See
+         "Install as an app" in README.md. -->
+    <!-- Title-bar color of the installed app; ThemeProvider keeps it in step
+         with the active theme's --background. -->
+    <meta name="theme-color" content="oklch(0.985 0 0)" />
+    <!-- No maximum-scale: pinch-zoom must stay enabled (WCAG 1.4.4). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Every page load opens a WebSocket to the Convex deployment before
+         anything renders (auth restore, then data). Warming the TCP+TLS
+         connection while the bundle downloads removes that handshake from
+         the critical path. Vite substitutes %VITE_CONVEX_URL% at build time. -->
+    <link rel="preconnect" href="%VITE_CONVEX_URL%" />
+    <title>CareCloud Patient Intake</title>
+    <meta name="description" content="Voice AI patient registration agent: REST API, Vapi webhook and dashboard" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
